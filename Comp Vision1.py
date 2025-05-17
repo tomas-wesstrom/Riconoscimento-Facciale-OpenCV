@@ -1,106 +1,73 @@
 # Importa i moduli necessari
-import cv2 as cv  # Libreria OpenCV per l'elaborazione delle immagini
-import time  # Modulo per misurare il tempo
-import os  # Modulo per interagire con il sistema operativo (es. gestione dei file)
-import numpy as np  # Libreria per operazioni numeriche
-from PIL import Image  # Python Imaging Library
-import shutil  # Modulo per operazioni sui file ad alto livello
+import cv2 as cv
+import time
+import os
+import numpy as np
+import shutil
 
 # Directory per salvare le immagini delle facce rilevate dalla webcam
 FACES_DIR = "detected_faces"
 # Directory contenente le immagini utilizzate per l'addestramento del riconoscimento facciale
 TRAINING_DIR = "training_images"
 
-# Soglia di confidenza per LBPH (più bassa = più sicuro, tipico 50-80)
-LBPH_CONFIDENCE_THRESHOLD = 70
-
-# Numero di frame consecutivi in cui una faccia deve essere rilevata/riconosciuta prima di essere salvata.
+# Soglia di tolleranza per confrontare le codifiche delle facce.
 FRAMES_TO_CONFIRM = 10
 
-# Dizionari per tenere traccia del conteggio dei rilevamenti/riconoscimenti per ogni volto.
+# Dizionari per il conteggio e lo stato.
 detection_counts = {}
 last_detection_state = {}
 recognition_counts = {}
 last_recognition = {}
+face_photo_taken = {}
 
-# Set per memorizzare i nomi delle facce già salvate per evitare duplicati.
-faces_saved_detected = set()
-faces_saved_training = set()
-
-# Carica il classificatore Haar Cascade per il rilevamento dei volti
-CASCADE_PATH = cv.data.haarcascades + "haarcascade_frontalface_default.xml"
+# Percorso al file Haar Cascade
+CASCADE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), 'haarcascades', 'haarcascade_frontalface_default.xml')
+)
+if not os.path.exists(CASCADE_PATH):
+    raise FileNotFoundError(f"Haar Cascade file not found: {CASCADE_PATH}")
 face_cascade = cv.CascadeClassifier(CASCADE_PATH)
 
-# File per salvare il modello LBPH
-TRAINER_FILE = "trainer.yml"
+# --- TRAINING LBPH MODEL IF NOT EXISTS ---
+LBPH_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'trainedData.yml')
+TRAINING_DIR = os.path.join(os.path.dirname(__file__), 'training_images')
 
-# Funzione per caricare i dati di training per LBPH
-# Ritorna: immagini (grayscale), labels (int), label2name (dict)
-def load_training_data_lbph(training_dir):
-    images = []
+# Build name_dict dynamically from training_images subfolders
+name_dict = {}
+if os.path.exists(TRAINING_DIR):
+    for idx, folder in enumerate(sorted(os.listdir(TRAINING_DIR)), 1):
+        if os.path.isdir(os.path.join(TRAINING_DIR, folder)):
+            name_dict[idx] = folder
+    print(f"Dynamic name_dict: {name_dict}")
+
+if not os.path.exists(LBPH_MODEL_PATH):
+    print("Modello LBPH non trovato, avvio training...")
+    faces = []
     labels = []
-    label2name = {}
-    name2label = {}
-    current_label = 0
-    files_without_faces = []
-    for person_name in os.listdir(training_dir):
-        person_path = os.path.join(training_dir, person_name)
-        if os.path.isdir(person_path):
-            if person_name not in name2label:
-                name2label[person_name] = current_label
-                label2name[current_label] = person_name
-                current_label += 1
-            label = name2label[person_name]
-            for filename in os.listdir(person_path):
-                if filename.lower().endswith((".jpg", ".jpeg", ".png")):
-                    filepath = os.path.join(person_path, filename)
-                    try:
-                        img = cv.imread(filepath, cv.IMREAD_GRAYSCALE)
-                        if img is None:
-                            print(f"Immagine non caricata: {filepath}")
-                            continue
-                        faces = face_cascade.detectMultiScale(img, scaleFactor=1.1, minNeighbors=3)
-                        if len(faces) > 0:
-                            for (x, y, w, h) in faces:
-                                face_img = img[y:y+h, x:x+w]
-                                face_img = cv.resize(face_img, (200, 200))
-                                images.append(face_img)
-                                labels.append(label)
-                                break  # Solo la prima faccia
-                        else:
-                            print(f"Nessuna faccia trovata in: {filepath}")
-                            files_without_faces.append(filepath)
-                    except Exception as e:
-                        print(f"Errore nel caricamento o codifica di {filepath}: {e}")
-    return images, labels, label2name, files_without_faces
-
-# Carica i dati di training.
-train_images, train_labels, label2name, files_to_remove = load_training_data_lbph(TRAINING_DIR)
-print(f"Caricate {len(train_images)} immagini di volti noti da {len(label2name)} persone.")
-
-# Rimuove le immagini senza volto dalla directory di training.
-for filepath in files_to_remove:
-    try:
-        os.remove(filepath)
-        print(f"Rimossa immagine senza volto: {filepath}")
-    except OSError as e:
-        print(f"Errore nella rimozione di {filepath}: {e}")
-
-# Addestra o carica il riconoscitore LBPH
-recognizer = cv.face.LBPHFaceRecognizer_create()
-if os.path.exists(TRAINER_FILE):
-    recognizer.read(TRAINER_FILE)
-    print(f"Modello LBPH caricato da {TRAINER_FILE}")
+    for idx, folder in name_dict.items():
+        folder_path = os.path.join(TRAINING_DIR, folder)
+        for filename in os.listdir(folder_path):
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                img_path = os.path.join(folder_path, filename)
+                img = cv.imread(img_path, cv.IMREAD_GRAYSCALE)
+                if img is not None:
+                    faces.append(cv.resize(img, (200, 200)))
+                    labels.append(idx)
+    if not faces:
+        print("Nessuna immagine trovata per l'addestramento.")
+        exit(1)
+    labels = np.array(labels)
+    recognizer = cv.face.LBPHFaceRecognizer_create()
+    recognizer.train(faces, labels)
+    recognizer.save(LBPH_MODEL_PATH)
+    print(f"Modello LBPH addestrato e salvato in {LBPH_MODEL_PATH}")
 else:
-    if len(train_images) > 0:
-        recognizer.train(train_images, np.array(train_labels))
-        recognizer.save(TRAINER_FILE)
-        print(f"Modello LBPH addestrato e salvato in {TRAINER_FILE}")
-    else:
-        recognizer = None
-        print("Nessuna immagine di training valida trovata!")
+    recognizer = cv.face.LBPHFaceRecognizer_create()
+    recognizer.read(LBPH_MODEL_PATH)
+    print(f"Modello LBPH caricato da {LBPH_MODEL_PATH}")
+lbph_enabled = True
 
-# Pulisce la directory delle facce rilevate all'avvio.
+# Pulisce la directory delle facce rilevate.
 if os.path.exists(FACES_DIR):
     try:
         shutil.rmtree(FACES_DIR)
@@ -120,102 +87,55 @@ if not webcam_video_stream.isOpened():
 else:
     print("Camera accessibile.")
 
-# Loop principale per l'elaborazione dei frame video.
+frame_count = 0
+process_every_n_frames = 3
+
+photo_taken = False
+
 while True:
     ret, frame = webcam_video_stream.read()
     if not ret:
         print("Fallito il recupero del frame")
         break
 
-    process_frame = True  # Processa sempre il frame
-    face_locations = []
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
     face_names_with_confidence = []
+    for (x, y, w, h) in faces:
+        label = "???"
+        confidence = 0.0
+        if lbph_enabled:
+            region = gray[y:y+h, x:x+w]
+            try:
+                id_pred, conf = recognizer.predict(region)
+                if conf < 100:
+                    label = name_dict.get(id_pred, str(id_pred))
+                    confidence = conf
+            except Exception as e:
+                print(f"LBPH prediction error: {e}")
+        face_names_with_confidence.append(((y, x+w, y+h, x), (label, confidence)))
 
-    if process_frame:
-        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        detected = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        for (x, y, w, h) in detected:
-            face_img = gray[y:y+h, x:x+w]
-            face_img_resized = cv.resize(face_img, (200, 200))
-            name = "???"
-            confidence = 0.0
-            if recognizer is not None:
-                label_pred, conf = recognizer.predict(face_img_resized)
-                if conf < LBPH_CONFIDENCE_THRESHOLD:
-                    name = label2name.get(label_pred, "???")
-                    confidence = 1.0 - (conf / 100.0)
-                else:
-                    confidence = 1.0 - (conf / 100.0)
-            face_locations.append((y, x + w, y + h, x))
-            face_names_with_confidence.append((name, confidence))
-        if detected is not None and len(detected) > 0:
-            last_face_locations = face_locations
-            last_face_names_with_confidence = face_names_with_confidence
-        else:
-            last_face_locations = []
-            last_face_names_with_confidence = []
-            detection_counts = {}
-            last_detection_state = {}
-            recognition_counts = {}
-            last_recognition = {}
-    else:
-        face_locations = last_face_locations
-        face_names_with_confidence = last_face_names_with_confidence
-
-    # Mostra i risultati sul frame e gestisce il salvataggio delle facce.
-    for i, ((top, right, bottom, left), (name, confidence)) in enumerate(zip(face_locations, face_names_with_confidence)):
+    for i, ((top, right, bottom, left), (name, confidence)) in enumerate(face_names_with_confidence):
         face_id = i
         face_image = frame[top:bottom, left:right]
         detection_state = name if name != "???" else "unknown"
 
-        # Logica per salvare le facce rilevate nella directory 'detected_faces'.
-        if face_id not in last_detection_state:
-            last_detection_state[face_id] = detection_state
-            detection_counts[face_id] = 1
-        elif last_detection_state[face_id] == detection_state:
-            detection_counts[face_id] += 1
-            if detection_counts[face_id] >= FRAMES_TO_CONFIRM:
-                detected_face_id = name if name != "???" else f"unknown_{face_id}"
-                if detected_face_id not in faces_saved_detected:
-                    filename_detected = os.path.join(FACES_DIR, f"{detected_face_id}.jpg")
-                    cv.imwrite(filename_detected, face_image)
-                    print(f"DETECTED (CONFIRMED): Faccia salvata come: {filename_detected}")
-                    faces_saved_detected.add(detected_face_id)
-        else:
-            last_detection_state[face_id] = detection_state
-            detection_counts[face_id] = 1
-
-        # Logica per salvare le facce riconosciute nella cartella di training.
-        if name != "???":
-            if face_id not in last_recognition:
-                last_recognition[face_id] = name
-                recognition_counts[face_id] = 1
-            elif last_recognition[face_id] == name:
-                recognition_counts[face_id] += 1
-                if recognition_counts[face_id] >= FRAMES_TO_CONFIRM and name not in faces_saved_training:
-                    person_folder = os.path.join(TRAINING_DIR, name)
-                    if os.path.exists(person_folder) and os.path.isdir(person_folder):
-                        filename_training = os.path.join(person_folder, f"captured_{int(time.time())}.jpg")
-                        cv.imwrite(filename_training, face_image)
-                        print(f"TRAINING (CONFIRMED): Riconosciuta come '{name}' per {FRAMES_TO_CONFIRM} frame, salvata in {filename_training}")
-                        faces_saved_training.add(name)
-            else:
-                last_recognition[face_id] = name
-                recognition_counts[face_id] = 1
-        elif face_id in last_recognition:
-            del last_recognition[face_id]
-            if face_id in recognition_counts:
-                del recognition_counts[face_id]
+        # Scatta una sola foto per sessione, solo se non già fatta
+        if not photo_taken:
+            filename_detected = os.path.join(FACES_DIR, f"{detection_state}_{int(time.time())}.jpg")
+            cv.imwrite(filename_detected, face_image)
+            print(f"Foto scattata e salvata come: {filename_detected}")
+            photo_taken = True
 
         label = f"{name} ({confidence:.2f})" if name != "???" else name
         cv.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
         cv.rectangle(frame, (left, bottom - 35), (right, bottom), (0, 0, 255), cv.FILLED)
         font = cv.FONT_HERSHEY_DUPLEX
-        rect_width = right - left
         font_scale = 0.8
         font_thickness = 1
         text_size = cv.getTextSize(label, font, font_scale, font_thickness)[0]
         text_width, text_height = text_size
+        rect_width = right - left
         while text_width > rect_width - 10:
             font_scale *= 0.9
             text_size = cv.getTextSize(label, font, font_scale, font_thickness)[0]
